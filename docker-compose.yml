@@ -76,7 +76,9 @@ services:
       RI_REDIS_PORT: "6379"
       RI_REDIS_ALIAS: WikiMasters
     ports:
-      - "${REDISINSIGHT_PORT:-8001}:5540"
+      # Pas d'authentification dans RedisInsight : restreignez l'accès (LAN/VPN)
+      # ou mettez REDISINSIGHT_BIND=127.0.0.1 et passez par un tunnel SSH.
+      - "${REDISINSIGHT_BIND:-0.0.0.0}:${REDISINSIGHT_PORT:-8001}:5540"
     volumes:
       - redisinsight_data:/data
     depends_on:
