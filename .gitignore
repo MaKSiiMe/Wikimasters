@@ -1,0 +1,44 @@
+# --- Secrets & local config -------------------------------------------------
+.env
+.env.*
+!.env.example
+stack.env
+
+# --- Python -----------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# --- ML artifacts (trained locally, shipped to the server out-of-band) ------
+ml_predictor/models/*
+!ml_predictor/models/.gitkeep
+*.onnx
+*.onnx.data
+*.pt
+*.pth
+runs/
+checkpoints/
+
+# --- Node -------------------------------------------------------------------
+node_modules/
+npm-debug.log*
+.npm/
+
+# --- Redis dumps if someone runs redis-server in the repo -------------------
+dump.rdb
+appendonly*.aof
+appendonlydir/
+
+# --- Editors / OS -----------------------------------------------------------
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
