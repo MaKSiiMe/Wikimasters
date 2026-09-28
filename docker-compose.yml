@@ -1,0 +1,204 @@
+# =============================================================================
+#  WikiMasters — stack de production (Portainer / docker compose v2)
+# =============================================================================
+#  Pensé pour un petit serveur Debian : images slim/alpine, limites mémoire,
+#  logs plafonnés, aucun port exposé inutilement.
+#
+#  Réseaux :
+#    - backend  : bridge INTERNE (internal: true). Tous les services s'y parlent,
+#                 aucun accès Internet. L'inférence ML n'est branchée que là.
+#    - frontend : bridge standard, nécessaire pour publier des ports (API,
+#                 RedisInsight) et pour la sortie Internet du tracker
+#                 (API Wikimedia + webhook Discord).
+#
+#  Variables : lues depuis `.env` à la racine (docker compose) ou depuis
+#  l'onglet "Environment variables" de Portainer. Voir `.env.example`.
+# =============================================================================
+
+name: wikimasters
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+x-redis-url: &redis-url redis://redis:6379/0
+
+services:
+  # ---------------------------------------------------------------------------
+  #  Base de données : historique des vues, alertes, journal des requêtes
+  # ---------------------------------------------------------------------------
+  redis:
+    image: redis:7.4-alpine
+    container_name: wikimasters-redis
+    restart: unless-stopped
+    # AOF (fsync chaque seconde) + snapshots RDB : on ne perd pas l'historique.
+    # noeviction : Redis refuse d'écrire plutôt que d'effacer de l'historique.
+    command: >
+      redis-server
+      --appendonly yes
+      --appendfsync everysec
+      --save 900 1
+      --save 300 100
+      --maxmemory ${REDIS_MAXMEMORY:-256mb}
+      --maxmemory-policy noeviction
+    volumes:
+      - redis_data:/data
+    # Publié sur 127.0.0.1 uniquement : accessible via tunnel SSH pour
+    # l'entraînement local (voir README), jamais depuis l'extérieur.
+    ports:
+      - "127.0.0.1:${REDIS_PORT:-6379}:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          memory: 384M
+    networks:
+      - backend
+      - frontend
+    logging: *default-logging
+
+  # ---------------------------------------------------------------------------
+  #  Interface graphique d'analyse de la base
+  # ---------------------------------------------------------------------------
+  redisinsight:
+    image: redis/redisinsight:latest
+    container_name: wikimasters-redisinsight
+    restart: unless-stopped
+    environment:
+      # Pré-enregistre la connexion vers le Redis de la stack.
+      RI_REDIS_HOST: redis
+      RI_REDIS_PORT: "6379"
+      RI_REDIS_ALIAS: WikiMasters
+    ports:
+      - "${REDISINSIGHT_PORT:-8001}:5540"
+    volumes:
+      - redisinsight_data:/data
+    depends_on:
+      redis:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+    networks:
+      - backend
+      - frontend
+    logging: *default-logging
+
+  # ---------------------------------------------------------------------------
+  #  Module 1 — Tracker Wikipédia (bot Python)
+  # ---------------------------------------------------------------------------
+  tracker:
+    build:
+      context: ./tracker
+    image: wikimasters/tracker:latest
+    container_name: wikimasters-tracker
+    restart: unless-stopped
+    environment:
+      REDIS_URL: *redis-url
+      WIKI_PROJECT: ${WIKI_PROJECT:-fr.wikipedia.org}
+      TRACKER_CONTACT: ${TRACKER_CONTACT:-https://github.com/MaKSiiMe/WikiMasters}
+      TRACKER_ARTICLES: ${TRACKER_ARTICLES:-}
+      TRACKER_INTERVAL_SECONDS: ${TRACKER_INTERVAL_SECONDS:-3600}
+      BACKFILL_DAYS: ${BACKFILL_DAYS:-730}
+      ENABLE_HOURLY_DUMPS: ${ENABLE_HOURLY_DUMPS:-true}
+      HOURLY_BOOTSTRAP_HOURS: ${HOURLY_BOOTSTRAP_HOURS:-48}
+      MAX_TRACKED_ARTICLES: ${MAX_TRACKED_ARTICLES:-2000}
+      SPIKE_THRESHOLD_PCT: ${SPIKE_THRESHOLD_PCT:-300}
+      SPIKE_MIN_VIEWS: ${SPIKE_MIN_VIEWS:-500}
+      DISCORD_WEBHOOK_URL: ${DISCORD_WEBHOOK_URL:-}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    depends_on:
+      redis:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+    networks:
+      - backend
+      - frontend # sortie Internet : Wikimedia + Discord
+    logging: *default-logging
+
+  # ---------------------------------------------------------------------------
+  #  Module 2 — Inférence ML (ONNX Runtime, CPU only)
+  # ---------------------------------------------------------------------------
+  ml_inference:
+    build:
+      context: ./ml_predictor
+    image: wikimasters/ml-inference:latest
+    container_name: wikimasters-ml
+    restart: unless-stopped
+    environment:
+      REDIS_URL: *redis-url
+      MODEL_DIR: /models
+      ORT_NUM_THREADS: ${ORT_NUM_THREADS:-1}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    volumes:
+      # Déposez-y model.onnx + model.json produits par train.py (rechargés à
+      # chaud). Sans modèle, l'API répond avec une heuristique.
+      - ${MODEL_DIR_HOST:-./ml_predictor/models}:/models:ro
+    expose:
+      - "8000"
+    depends_on:
+      redis:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
+    networks:
+      - backend # isolé : aucun accès Internet, aucun port publié
+    logging: *default-logging
+
+  # ---------------------------------------------------------------------------
+  #  Module 3 — API relais Fastify (seul point d'entrée pour le userscript)
+  # ---------------------------------------------------------------------------
+  api_bridge:
+    build:
+      context: ./api_bridge
+    image: wikimasters/api-bridge:latest
+    container_name: wikimasters-api
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      PORT: "3000"
+      REDIS_URL: *redis-url
+      ML_API_URL: http://ml_inference:8000
+      CORS_ORIGINS: ${CORS_ORIGINS:-https://www.wiki-masters.com}
+      CACHE_TTL_SECONDS: ${CACHE_TTL_SECONDS:-60}
+      RATE_LIMIT_PER_MINUTE: ${RATE_LIMIT_PER_MINUTE:-300}
+      LOG_LEVEL: ${LOG_LEVEL_API:-info}
+    ports:
+      - "${API_BIND:-0.0.0.0}:${API_PORT:-3000}:3000"
+    depends_on:
+      redis:
+        condition: service_healthy
+      ml_inference:
+        condition: service_started
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+    networks:
+      - backend
+      - frontend
+    logging: *default-logging
+
+networks:
+  backend:
+    driver: bridge
+    internal: true
+  frontend:
+    driver: bridge
+
+volumes:
+  redis_data:
+  redisinsight_data:
