@@ -34,6 +34,7 @@ from pathlib import Path
 import requests
 
 from alerts import DiscordNotifier, Evolution, daily_evolution, hourly_evolution
+from rarity import rarity_outlook
 from storage import Storage, hour_label, normalize_title
 from wikimedia import WikimediaClient, build_session
 
@@ -259,12 +260,17 @@ class Tracker:
         today = utcnow().date()
         spikes = []
         for title in sorted(titles):
+            stats: dict = {}
             evo = self.evolution(title, done_hours, today)
-            if evo is None:
-                continue
-            self.storage.save_stats(title, evo.as_stats(self.cfg.spike_threshold_pct, self.cfg.spike_min_views))
-            if evo.is_spike(self.cfg.spike_threshold_pct, self.cfg.spike_min_views):
-                spikes.append(evo)
+            if evo is not None:
+                stats.update(evo.as_stats(self.cfg.spike_threshold_pct, self.cfg.spike_min_views))
+                if evo.is_spike(self.cfg.spike_threshold_pct, self.cfg.spike_min_views):
+                    spikes.append(evo)
+            outlook = rarity_outlook(self.storage.daily_views(title), today)
+            if outlook is not None:
+                stats.update(outlook.as_stats())
+            if stats:
+                self.storage.save_stats(title, stats)
         for evo in spikes:
             self.alert(evo)
         return spikes

@@ -11,7 +11,7 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install -r requirements.txt
 
-COPY tracker.py storage.py wikimedia.py alerts.py articles.txt ./
+COPY tracker.py storage.py wikimedia.py alerts.py rarity.py articles.txt ./
 
 RUN useradd --system --uid 10001 --no-create-home tracker
 USER tracker
