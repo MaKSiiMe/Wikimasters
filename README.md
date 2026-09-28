@@ -11,18 +11,18 @@ de sa page Wikipédia.
 
 ```mermaid
 flowchart LR
-    subgraph Serveur Debian — stack Portainer
-        T[tracker<br/>Python] -->|vues horaires/quotidiennes| R[(Redis)]
-        T -->|pic +300 %| D[Discord]
-        ML[ml_inference<br/>FastAPI + ONNX CPU] -->|historique| R
-        API[api_bridge<br/>Fastify] -->|stats brutes| R
-        API -->|/predict| ML
-        RI[RedisInsight :8001] --- R
+    subgraph srv["Serveur Debian (stack Portainer)"]
+        T["tracker<br/>Python"] -->|"vues horaires/quotidiennes"| R[("Redis")]
+        T -->|"pic +300 %"| D["Discord"]
+        ML["ml_inference<br/>FastAPI + ONNX CPU"] -->|"historique"| R
+        API["api_bridge<br/>Fastify"] -->|"stats brutes"| R
+        API -->|"/predict"| ML
+        RI["RedisInsight :8001"] --- R
     end
-    W[(Wikimedia<br/>REST API + dumps)] --> T
-    GPU[PC local RTX 3060<br/>train.py] -->|tunnel SSH| R
-    GPU -->|model.onnx| ML
-    US[Userscript<br/>wiki-masters.com] -->|GET /api/card/:name| API
+    W[("Wikimedia<br/>REST API + dumps")] --> T
+    GPU["PC local RTX 3060<br/>train.py"] -->|"tunnel SSH"| R
+    GPU -->|"model.onnx"| ML
+    US["Userscript<br/>wiki-masters.com"] -->|"GET /api/card/:name"| API
 ```
 
 ## Sommaire
