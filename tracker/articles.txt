@@ -1,0 +1,28 @@
+# Articles suivis dès le démarrage (un par ligne, titre Wikipédia ou nom de carte).
+# Les redirections sont résolues automatiquement. Les cartes vues par le
+# userscript sur la place de marché sont ajoutées dynamiquement.
+# Liste initiale : cartes présentées sur la page d'accueil de wiki-masters.com.
+Abeille
+Ada Lovelace
+Albert Einstein
+Canis lupus
+Chat
+Cléopâtre VII
+Colisée
+Frida Kahlo
+Grande Muraille
+Hibou
+Léonard de Vinci
+Machu Picchu
+Manchot empereur
+Marie Curie
+Mont Fuji
+Nikola Tesla
+Origami
+Pieuvre
+Pompéi
+Pyramide de Khéops
+Saturne (planète)
+Soleil
+Stonehenge
+Titanic
