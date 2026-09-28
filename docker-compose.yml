@@ -105,7 +105,7 @@ services:
     environment:
       REDIS_URL: *redis-url
       WIKI_PROJECT: ${WIKI_PROJECT:-fr.wikipedia.org}
-      TRACKER_CONTACT: ${TRACKER_CONTACT:-https://github.com/MaKSiiMe/WikiMasters}
+      TRACKER_CONTACT: ${TRACKER_CONTACT:-https://github.com/MaKSiiMe/Wikimasters}
       TRACKER_ARTICLES: ${TRACKER_ARTICLES:-}
       TRACKER_INTERVAL_SECONDS: ${TRACKER_INTERVAL_SECONDS:-3600}
       BACKFILL_DAYS: ${BACKFILL_DAYS:-730}

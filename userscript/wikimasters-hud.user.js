@@ -1,14 +1,14 @@
 // ==UserScript==
 // @name         WikiMasters HUD — Trend Score
-// @namespace    https://github.com/MaKSiiMe/WikiMasters
+// @namespace    https://github.com/MaKSiiMe/Wikimasters
 // @version      0.1.0
 // @description  Affiche sous le prix de chaque carte un badge « Trend Score » (évolution du trafic Wikipédia + prédiction ML) servi par votre propre API WikiMasters. Lecture seule : aucune action automatisée.
 // @author       MaKSiiMe
 // @license      MIT
-// @homepageURL  https://github.com/MaKSiiMe/WikiMasters
-// @supportURL   https://github.com/MaKSiiMe/WikiMasters/issues
-// @updateURL    https://raw.githubusercontent.com/MaKSiiMe/WikiMasters/main/userscript/wikimasters-hud.user.js
-// @downloadURL  https://raw.githubusercontent.com/MaKSiiMe/WikiMasters/main/userscript/wikimasters-hud.user.js
+// @homepageURL  https://github.com/MaKSiiMe/Wikimasters
+// @supportURL   https://github.com/MaKSiiMe/Wikimasters/issues
+// @updateURL    https://raw.githubusercontent.com/MaKSiiMe/Wikimasters/main/userscript/wikimasters-hud.user.js
+// @downloadURL  https://raw.githubusercontent.com/MaKSiiMe/Wikimasters/main/userscript/wikimasters-hud.user.js
 // @match        https://www.wiki-masters.com/*
 // @run-at       document-idle
 // @noframes

@@ -57,7 +57,7 @@ def _env_int(name: str, default: int) -> int:
 class Config:
     redis_url: str = "redis://localhost:6379/0"
     project: str = "fr.wikipedia.org"
-    contact: str = "https://github.com/MaKSiiMe/WikiMasters"
+    contact: str = "https://github.com/MaKSiiMe/Wikimasters"
     extra_articles: tuple[str, ...] = ()
     interval_seconds: int = 3600
     pending_poll_seconds: int = 60

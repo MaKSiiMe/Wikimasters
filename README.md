@@ -67,7 +67,7 @@ flowchart LR
 Prérequis : Docker Engine ≥ 24 avec le plugin Compose v2.
 
 ```bash
-git clone https://github.com/MaKSiiMe/WikiMasters.git && cd WikiMasters
+git clone https://github.com/MaKSiiMe/Wikimasters.git && cd Wikimasters
 cp .env.example .env          # renseignez au moins DISCORD_WEBHOOK_URL
 docker compose up -d --build
 docker compose logs -f tracker
@@ -101,7 +101,7 @@ tracker sort sur Internet.
 
 1. **Portainer → Stacks → Add stack**, nom : `wikimasters`.
 2. Méthode de build **Repository** :
-   - Repository URL : `https://github.com/MaKSiiMe/WikiMasters` (ou votre fork)
+   - Repository URL : `https://github.com/MaKSiiMe/Wikimasters` (ou votre fork)
    - Reference : `refs/heads/main`
    - Compose path : `docker-compose.yml`
    - (optionnel) cochez **Automatic updates** pour redéployer à chaque push.
