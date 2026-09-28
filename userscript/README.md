@@ -1,41 +1,53 @@
 # WikiMasters HUD (userscript Tampermonkey)
 
-Affiche sous le prix de chaque carte de [wiki-masters.com](https://www.wiki-masters.com)
-un badge **Trend Score** :
+Affiche sous chaque carte de [wiki-masters.com](https://www.wiki-masters.com) (enchères,
+collection, page d'une enchère) un **signal de marché expliqué** :
 
 | Badge | Signification |
 |---|---|
-| 🟩 `▲ Trend +42 · +39 % 24 h` | tendance haussière prédite (score ≥ +5) |
-| 🟥 `▼ Trend −30 · −12 % 1 j` | tendance baissière prédite (score ≤ −5) |
-| ⬜ `■ Trend +2` | stable |
-| 🔥 | probabilité ≥ 50 % d'un pic de trafic de +300 % sous 7 jours |
+| 🟩 `ACHAT 📈 UR dans ~2 j` | des raisons d'achat, sans prix excessif |
+| 🟥 `VENDRE 📉 Perd UR dans ~4 j` | des raisons de revente |
+| 🟧 `À SURVEILLER 💸 +40 % vs moy.` | signaux contradictoires (ex. bonne carte mais trop chère) |
+| ⬜ `—` | rien de notable |
 | `⏳ Suivi en cours` | carte inconnue, le tracker vient de l'ajouter (données sous ~1 min) |
 
-Survolez un badge pour le détail (vues, probabilité de pic, version du modèle).
+`+2` indique d'autres raisons ; survolez le badge pour tout voir : rareté affichée vs rareté
+d'après le trafic (30 j glissants et mois précédent), vues restantes avant le prochain palier,
+tendance 24 h, prix vs moyenne des ventes, score ML (expérimental).
 
 ## Installation
 
-1. Installez [Tampermonkey](https://www.tampermonkey.net/).
-2. Ouvrez [`wikimasters-hud.user.js`](wikimasters-hud.user.js) en version *raw* : Tampermonkey propose l'installation.
-3. Sur wiki-masters.com, menu Tampermonkey → **⚙️ URL de l'API…** → l'adresse de votre `api_bridge`
-   (défaut `http://localhost:3000`), puis **🩺 Tester la connexion**.
+1. Installez [Tampermonkey](https://www.tampermonkey.net/) (ou Violentmonkey).
+2. Ouvrez [`wikimasters-hud.user.js`](wikimasters-hud.user.js) en version *raw* : l'installation est proposée.
+3. Sur wiki-masters.com, menu Tampermonkey → **⚙️ URL de l'API…** → l'adresse de votre
+   `api_bridge` (ex. `https://<machine>.<tailnet>.ts.net` avec Tailscale Serve), puis
+   **🩺 Tester la connexion**.
 
-> Le script appelle **votre** API (voir le README principal pour la déployer). Une page HTTPS
-> ne peut appeler qu'une API en HTTPS, ou `http://localhost`. Depuis un serveur distant, passez
-> par un reverse proxy HTTPS ou un tunnel SSH (`ssh -L 3000:localhost:3000 serveur`).
+> Une page HTTPS ne peut appeler qu'une API en HTTPS, ou `http://localhost`.
 
-## Vie privée et règles du jeu
+## Ce que le script lit et envoie
 
-- Lecture seule : le script ne clique sur rien, n'achète et ne vend rien, et n'envoie aucune
-  requête aux serveurs de wiki-masters.com.
-- Seuls les **noms des cartes affichées** sont envoyés à l'API que vous avez configurée.
-- Les [règles de WikiMasters](https://www.wiki-masters.com/rules) (§3) interdisent les outils
-  qui jouent ou échangent à votre place ainsi que l'interception du trafic du service. Ce HUD
-  ne fait ni l'un ni l'autre, mais vous restez responsable de son usage sur votre compte.
+- **Dans la page** : les données que le jeu a déjà chargées dans ses composants React
+  (`card_id`, `wikipedia_title`, rareté, enchère en cours), à défaut le texte affiché. Le
+  script s'exécute pour cela dans le contexte de la page (`@sandbox JavaScript`,
+  `@inject-into page`).
+- **API du jeu, en lecture seule, avec votre session** (désactivable : menu **💰 Prix moyens du jeu**) :
+  prix moyen des ventes par rareté et détail d'une enchère. Deux requêtes à la fois au
+  maximum, 400 ms d'écart, cache de 6 h, pause automatique si le jeu répond 429.
+- **Vers votre API uniquement** : une requête groupée pour les signaux, et (désactivable :
+  menu **📥 Collecte des observations**) les observations — rareté affichée, prix, champs de
+  la carte — pour retrouver la formule de rareté du jeu et vérifier les signaux.
+
+Le script ne clique sur rien, ne mise pas, n'achète et ne vend rien.
+
+## Cohabitation avec d'autres scripts
+
+Compatible avec *WikiMasters - Affichage des prix moyens (KKH)* et *Instant Price Check* :
+le badge se place après le « Moy. ventes » de KKH et affiche l'écart à la moyenne plutôt que
+de la répéter.
 
 ## Adapter les sélecteurs
 
-Les sélecteurs sont regroupés dans l'objet `CONFIG.selectors`, en haut du script : carte
-`[class*="aspect-[5/7]"]`, nom `h3`, et une liste de candidats pour le prix, avec un repli
-sur le texte (`1 250 💰`, `980 pièces`…). Si le site change son balisage, c'est le seul endroit
-à modifier. Activez **🐞 Debug** dans le menu pour tracer la détection dans la console.
+Tout est dans `CONFIG.selectors` en haut du script (enchères `[id^="marketplace-auction-"]`,
+cartes, ligne du vendeur, badge de rareté…). Activez **🐞 Debug** pour tracer la détection
+dans la console.

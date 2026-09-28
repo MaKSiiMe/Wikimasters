@@ -42,3 +42,6 @@ appendonlydir/
 *.swp
 .DS_Store
 Thumbs.db
+
+# --- Third-party userscripts kept locally for reference (not ours to redistribute)
+wm-extension/

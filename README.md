@@ -274,6 +274,47 @@ Légende des badges : voir [userscript/README.md](userscript/README.md).
 **404** `{"status":"unknown"}` : aucun article Wikipédia ne correspond.
 **403** : origine non autorisée. **429** : limite de débit. **503** : Redis indisponible.
 
+### `POST /api/cards` (utilisé par le HUD)
+
+Une seule requête pour toutes les cartes affichées (60 max). Chaque carte peut porter ce que
+le HUD a lu dans le jeu, ce qui permet de calculer des signaux :
+
+```json
+{ "cards": [ { "title": "Saturne (planète)", "name": "Saturne (planète)", "rarity": "SR", "price": 800, "avg_price": 1000 } ] }
+```
+
+Réponse `{"results": [...]}` dans le même ordre ; chaque résultat reprend le format de
+`GET /api/card/:name` (avec `http_status`), enrichi de :
+
+- `rarity` : rareté estimée d'après le trafic (`estimated_30d` sur 30 jours glissants,
+  `estimated_prev_month` sur le mois calendaire précédent), `views_30d`, prochain palier
+  (`next`, `views_to_next`), date estimée de franchissement (`eta_days`) et risque de
+  rétrogradation (`downgrade_eta_days`) ;
+- `signals` : `verdict` (`buy` / `sell` / `watch` / `neutral`), `reasons` (code, texte, poids)
+  et `price_delta_pct` (prix vs moyenne des ventes).
+
+Règles des signaux ([api_bridge/src/signals.js](api_bridge/src/signals.js)) :
+
+| Raison | Sens | Condition |
+|---|---|---|
+| ⭐ `rarity_upgrade` | achat | le trafic correspond à une rareté supérieure à celle affichée |
+| ⚠ `rarity_downgrade` | vente | le trafic correspond à une rareté inférieure |
+| 📈 `near_upgrade` | achat | palier suivant atteint en ≤ 7 jours au rythme actuel |
+| 📉 `near_downgrade` | vente | rareté perdue en ≤ 7 jours (un pic sort de la fenêtre) |
+| 🚀 `hype` | achat | ≥ +100 % sur 24 h et ≥ 200 vues |
+| ⬇️ `cooling` | vente | ≤ −40 % sur 24 h |
+| 💰 `cheap` / 💸 `expensive` | prix | enchère ≤ −15 % ou ≥ +25 % vs moyenne des ventes |
+
+Le score ML est renvoyé à titre informatif (`trend_score`) : il n'entre pas dans le verdict
+tant qu'il n'a pas battu ces règles sur un backtest.
+
+### `POST /api/observations` (collecte du HUD)
+
+Ce que le HUD a vu dans le jeu (rareté affichée, enchère, prix moyen des ventes, champs de la
+carte comme les vues sur 30 jours ou le Q-Score), par lots de 100 max. Stocké dans
+`wm:observations` et `wm:obs:latest:<titre>` pour retrouver la formule de rareté du jeu et
+évaluer les signaux contre les vrais prix.
+
 ### `GET /health`
 
 État de Redis et de l'inférence (version du modèle chargé).
@@ -294,12 +335,14 @@ Légende des badges : voir [userscript/README.md](userscript/README.md).
 | `wm:alias` | HASH | nom de carte normalisé → titre canonique |
 | `wm:views:daily:<titre>` | HASH | `YYYYMMDD` → vues (API REST) |
 | `wm:views:hourly:<titre>` | HASH | `YYYYMMDDHH` → vues (dumps, 14 j de rétention) |
-| `wm:stats:<titre>` | HASH | dernière évolution brute (lue par l'API) |
+| `wm:stats:<titre>` | HASH | dernière évolution brute + rareté estimée, palier suivant, ETA (lue par l'API) |
 | `wm:meta:<titre>` | HASH | suivi interne (dernière collecte, début de couverture horaire) |
 | `wm:dumps:done` | ZSET | heures de dumps traitées |
 | `wm:alerts` | STREAM | historique des alertes |
 | `wm:tracker:runs` | STREAM | journal des cycles du tracker |
 | `wm:bridge:requests` | STREAM | journal des requêtes de l'API (~10 000 dernières) |
+| `wm:observations` | STREAM | observations du HUD (~50 000 dernières) |
+| `wm:obs:latest:<titre>` | HASH | dernière rareté / prix vus dans le jeu pour une carte |
 
 Les titres utilisent la forme MediaWiki avec underscores (`Saturne_(planète)`). La règle de
 normalisation est implémentée à l'identique en Python et en JavaScript.
@@ -331,9 +374,13 @@ make test
   [dumps Wikimedia](https://dumps.wikimedia.org/other/pageviews/), soit ~60 Mo téléchargés
   par heure (~1,4 Go/jour), traités en flux sans écriture disque. Ils sont publiés avec
   1 à 2 h de retard. Désactivable avec `ENABLE_HOURLY_DUMPS=false`.
-- **Place de marché** : son HTML n'étant accessible qu'une fois connecté, la position du prix
-  est détectée par heuristique (icône de pièce, classe `price`, texte « 1 250 💰 »). En
-  l'absence de prix, le badge s'affiche sous la carte. Ajustez `CONFIG.selectors` si besoin.
+- **Données du jeu** : le HUD lit les données internes des composants React du site
+  (`wikipedia_title`, rareté, enchère). Si le jeu change sa structure, il retombe sur le
+  texte affiché, et `CONFIG.selectors` centralise les sélecteurs.
+- **Formule de rareté** : le jeu parle de « vues mensuelles » sans préciser la fenêtre, et ses
+  chiffres semblent en retard sur Wikimedia (« Chat » : 22 227 vues affichées, 25 724 sur les
+  30 derniers jours). Les deux hypothèses sont calculées ; les observations du HUD serviront à
+  trancher.
 - **Projet Wikipédia** : les cartes observées sont en français (`fr.wikipedia.org`).
   Changez `WIKI_PROJECT` si le jeu évolue.
 
