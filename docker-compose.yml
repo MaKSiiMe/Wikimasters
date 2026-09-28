@@ -172,6 +172,7 @@ services:
       PORT: "3000"
       REDIS_URL: *redis-url
       ML_API_URL: http://ml_inference:8000
+      WIKI_PROJECT: ${WIKI_PROJECT:-fr.wikipedia.org}
       CORS_ORIGINS: ${CORS_ORIGINS:-https://www.wiki-masters.com}
       CACHE_TTL_SECONDS: ${CACHE_TTL_SECONDS:-60}
       RATE_LIMIT_PER_MINUTE: ${RATE_LIMIT_PER_MINUTE:-300}
