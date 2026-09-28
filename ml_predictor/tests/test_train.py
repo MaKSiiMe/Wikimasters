@@ -35,3 +35,15 @@ def test_end_to_end_synthetic_training(tmp_path):
     assert meta["onnx_max_abs_diff"] < 1e-3
     assert (tmp_path / "model.onnx").stat().st_size > 10_000
     assert (tmp_path / "model.pt").exists()
+
+
+def test_calibration_undoes_pos_weight_inflation():
+    rng = np.random.default_rng(0)
+    labels = (rng.random(4000) < 0.05).astype(np.float32)
+    # logits shifted up by log(20), as a pos_weight of 20 would do
+    logits = (labels * 3.0 - 1.5 + rng.normal(0, 1.0, 4000) + np.log(20.0)).astype(np.float32)
+    a, b, method = train.fit_calibration(logits, labels, pos_weight=20.0)
+    probs = 1 / (1 + np.exp(-(a * logits + b)))
+    assert method == "platt" and a > 0
+    assert abs(probs.mean() - labels.mean()) < 0.01  # calibrated on average
+    assert train.fit_calibration(logits[:5], labels[:5], 20.0) == (1.0, -np.log(20.0), "prior")

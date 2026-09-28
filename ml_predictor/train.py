@@ -11,7 +11,8 @@ tracker from Redis, trains a small multi-task LSTM and writes:
 
 Heads:
     trend       expected log-ratio of the next 7 days vs the last 7 days
-    spike_prob  probability of a +300 % day within the next 7 days
+    spike_prob  probability of a +300 % day within the next 7 days (Platt-calibrated
+                on validation windows, since pos_weight inflates raw sigmoid outputs)
 
 Examples:
     # Redis of the server, reached through an SSH tunnel (see README)
@@ -155,15 +156,17 @@ class TrendNet(nn.Module):
 
 
 class ExportWrapper(nn.Module):
-    """What ships to ONNX: sigmoid applied so the server gets a probability."""
+    """What ships to ONNX: calibrated sigmoid so the server gets a real probability."""
 
-    def __init__(self, model: TrendNet):
+    def __init__(self, model: TrendNet, calib: tuple[float, float] = (1.0, 0.0)):
         super().__init__()
         self.model = model
+        self.register_buffer("calib_a", torch.tensor(float(calib[0])))
+        self.register_buffer("calib_b", torch.tensor(float(calib[1])))
 
     def forward(self, series: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         trend, logit = self.model(series)
-        return trend, torch.sigmoid(logit)
+        return trend, torch.sigmoid(self.calib_a * logit + self.calib_b)
 
 
 # ----------------------------------------------------------------------------
@@ -198,9 +201,44 @@ def roc_auc(y: np.ndarray, p: np.ndarray) -> float:
     return float((ranks[pos].sum() - n_pos * (n_pos + 1) / 2) / (n_pos * n_neg))
 
 
+def fit_calibration(logits: np.ndarray, labels: np.ndarray, pos_weight: float) -> tuple[float, float, str]:
+    """Undo the probability inflation caused by ``pos_weight``.
+
+    Platt scaling (sigmoid(a * logit + b), fitted on validation windows) when
+    there are enough positives, otherwise the analytical prior correction
+    b = -log(pos_weight).
+    """
+    prior = (1.0, -math.log(pos_weight), "prior")
+    if labels.sum() < 10 or (1 - labels).sum() < 10:
+        return prior
+    x = torch.from_numpy(logits.astype(np.float64))
+    y = torch.from_numpy(labels.astype(np.float64))
+    a = torch.tensor(1.0, dtype=torch.float64, requires_grad=True)
+    b = torch.tensor(prior[1], dtype=torch.float64, requires_grad=True)
+    optim = torch.optim.LBFGS([a, b], lr=0.5, max_iter=200, line_search_fn="strong_wolfe")
+
+    def closure():
+        optim.zero_grad()
+        loss = nn.functional.binary_cross_entropy_with_logits(a * x + b, y)
+        loss.backward()
+        return loss
+
+    optim.step(closure)
+    if not (torch.isfinite(a) and torch.isfinite(b)) or a.item() <= 0:
+        return prior
+    return float(a.item()), float(b.item()), "platt"
+
+
+@torch.no_grad()
+def predict_logits(model: TrendNet, x: torch.Tensor, batch_size: int) -> np.ndarray:
+    model.eval()
+    return np.concatenate([model(x[i:i + batch_size])[1].float().cpu().numpy()
+                           for i in range(0, len(x), batch_size)])
+
+
 @torch.no_grad()
 def evaluate(model: TrendNet, data: dict[str, torch.Tensor], batch_size: int, spike_loss: nn.Module,
-             spike_weight: float) -> dict[str, float]:
+             spike_weight: float, calib: tuple[float, float] = (1.0, 0.0)) -> dict[str, float]:
     model.eval()
     trends, probs, losses = [], [], []
     n = len(data["x"])
@@ -211,7 +249,7 @@ def evaluate(model: TrendNet, data: dict[str, torch.Tensor], batch_size: int, sp
             + spike_weight * spike_loss(logit, data["spike"][i:i + batch_size]) * len(x)
         losses.append(loss.item())
         trends.append(trend.float().cpu().numpy())
-        probs.append(torch.sigmoid(logit).float().cpu().numpy())
+        probs.append(torch.sigmoid(calib[0] * logit + calib[1]).float().cpu().numpy())
     pred_t, pred_p = np.concatenate(trends), np.concatenate(probs)
     y_t, y_s = data["trend"].cpu().numpy(), data["spike"].cpu().numpy()
     moving = np.abs(y_t) > 0.05
@@ -224,11 +262,12 @@ def evaluate(model: TrendNet, data: dict[str, torch.Tensor], batch_size: int, sp
         "spike_auc": roc_auc(y_s, pred_p),
         "spike_precision": tp / max(int(predicted.sum()), 1),
         "spike_recall": tp / max(int((y_s > 0.5).sum()), 1),
+        "spike_brier": float(np.mean((pred_p - y_s) ** 2)),
     }
 
 
 def train(args: argparse.Namespace, train_ds: Dataset, val_ds: Dataset, device: torch.device
-          ) -> tuple[TrendNet, dict[str, float], int]:
+          ) -> tuple[TrendNet, dict[str, float], int, dict]:
     def to_device(ds: Dataset) -> dict[str, torch.Tensor]:
         # The whole dataset fits in VRAM (tens of MB): no DataLoader overhead.
         return {k: torch.from_numpy(v).to(device) for k, v in (("x", ds.x), ("trend", ds.trend), ("spike", ds.spike))}
@@ -278,18 +317,25 @@ def train(args: argparse.Namespace, train_ds: Dataset, val_ds: Dataset, device: 
                 break
 
     model.load_state_dict(best_state)
-    return model, best_metrics, best_epoch
+
+    val_logits = predict_logits(model, va["x"], args.batch_size * 4)
+    a, b, method = fit_calibration(val_logits, val_ds.spike, pos_weight)
+    calibrated = evaluate(model, va, args.batch_size * 4, spike_loss, args.spike_weight, calib=(a, b))
+    log.info("Spike calibration (%s): a=%.3f b=%.3f | Brier %.4f -> %.4f | P %.2f R %.2f at p>=0.5",
+             method, a, b, best_metrics["spike_brier"], calibrated["spike_brier"],
+             calibrated["spike_precision"], calibrated["spike_recall"])
+    return model, calibrated, best_epoch, {"a": a, "b": b, "method": method, "pos_weight": pos_weight}
 
 
 # ----------------------------------------------------------------------------
 #  Export
 # ----------------------------------------------------------------------------
 
-def export_onnx(model: TrendNet, path: Path, opset: int) -> float:
+def export_onnx(model: TrendNet, path: Path, opset: int, calib: tuple[float, float] = (1.0, 0.0)) -> float:
     """Export to ONNX (dynamic batch) and check ONNX Runtime matches PyTorch."""
     import onnxruntime as ort
 
-    wrapper = ExportWrapper(model.cpu().eval()).eval()
+    wrapper = ExportWrapper(model.cpu().eval(), calib).eval()
     dummy = torch.zeros(1, F.WINDOW_DAYS, F.N_FEATURES)  # batch 1 = safe LSTM export
     tmp = path.with_suffix(".onnx.tmp")
     with warnings.catch_warnings():
@@ -376,14 +422,15 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit("No usable series. Is the tracker running and the Redis tunnel open?")
 
     train_ds, val_ds = make_datasets(series, args.val_frac, args.stride)
-    model, metrics, best_epoch = train(args, train_ds, val_ds, device)
+    model, metrics, best_epoch, calibration = train(args, train_ds, val_ds, device)
 
     args.out.mkdir(parents=True, exist_ok=True)
     onnx_path = args.out / "model.onnx"
-    max_diff = export_onnx(model, onnx_path, args.opset)
+    max_diff = export_onnx(model, onnx_path, args.opset, (calibration["a"], calibration["b"]))
     version = datetime.now(timezone.utc).strftime("lstm-%Y%m%dT%H%M%SZ")
     torch.save({"state_dict": model.state_dict(), "hparams": {
-        "hidden": args.hidden, "layers": args.layers, "dropout": args.dropout}, "version": version},
+        "hidden": args.hidden, "layers": args.layers, "dropout": args.dropout},
+        "calibration": calibration, "version": version},
         args.out / "model.pt")
     write_json_atomic(args.out / "model.json", {
         "version": version,
@@ -402,6 +449,7 @@ def main(argv: list[str] | None = None) -> int:
         "val_windows": len(val_ds),
         "best_epoch": best_epoch,
         "metrics": {k: round(v, 4) for k, v in metrics.items() if not math.isnan(v)},
+        "spike_calibration": calibration,
         "onnx_max_abs_diff": max_diff,
         "hparams": {k: v for k, v in vars(args).items() if k in {
             "hidden", "layers", "dropout", "lr", "batch_size", "spike_weight", "epochs", "stride", "seed"}},
