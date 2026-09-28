@@ -21,6 +21,8 @@ function seedSaturne(redis) {
   redis.hset('wm:stats:Saturne_(planète)', {
     window: '24h', views_current: '1200', views_previous: '300', evolution_pct: '300.0',
     is_spike: '1', as_of: '2026092811', updated_at: '2026-09-28T12:05:00+00:00',
+    rarity_as_of: '20260927', views_30d: '4800', rarity_30d: 'SR', views_prev_month: '4100',
+    rarity_prev_month: 'SR', next_rarity: 'UR', views_to_next: '200', eta_days: '2', downgrade_eta_days: '',
   });
 }
 
@@ -116,6 +118,66 @@ describe('GET /api/card/:name', () => {
   });
 });
 
+describe('POST /api/cards', () => {
+  test('answers every card of the page in one request, with signals', async () => {
+    const { app, redis, fetch } = await setup({ predictions: SATURNE_PRED });
+    seedSaturne(redis);
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/cards',
+      headers: { origin: ORIGIN },
+      payload: { cards: [
+        { title: 'Saturne (planète)', name: 'Saturne', rarity: 'SR', price: 800, avg_price: 1000 },
+        { name: 'Mont Fuji' },
+      ] },
+    });
+    assert.equal(res.statusCode, 200);
+    const [saturne, fuji] = res.json().results;
+    assert.equal(saturne.http_status, 200);
+    assert.equal(saturne.name, 'Saturne');
+    assert.equal(saturne.rarity.estimated_30d, 'SR');
+    assert.equal(saturne.rarity.eta_days, 2);
+    assert.equal(saturne.rarity.downgrade_eta_days, null);
+    assert.equal(saturne.signals.verdict, 'buy');
+    assert.equal(saturne.signals.price_delta_pct, -20);
+    assert.deepEqual(saturne.signals.reasons.map((r) => r.code), ['near_upgrade', 'hype', 'cheap']);
+    assert.equal(fuji.http_status, 202);
+    assert.equal(fetch.calls.length, 1);
+  });
+
+  test('rejects oversized or malformed batches', async () => {
+    const { app } = await setup();
+    const tooMany = Array.from({ length: 61 }, (_, i) => ({ name: `c${i}` }));
+    assert.equal((await app.inject({ method: 'POST', url: '/api/cards', payload: { cards: tooMany } })).statusCode, 400);
+    assert.equal((await app.inject({ method: 'POST', url: '/api/cards', payload: { cards: [{ rarity: 'SR' }] } })).statusCode, 400);
+    assert.equal((await app.inject({ method: 'POST', url: '/api/cards', payload: { cards: [{ name: 'x', rarity: 'XX' }] } })).statusCode, 400);
+  });
+});
+
+describe('POST /api/observations', () => {
+  test('stores observations and the latest state per card', async () => {
+    const { app, redis } = await setup();
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/observations',
+      payload: { observations: [{
+        seen_at: '2026-09-28T06:00:00Z', page: 'marketplace', card_id: 'c-1', listing_id: 'l-1',
+        title: 'Chat', rarity: 'L', price: { current: 1200, base: 900 }, avg_price: 1100,
+        fields: { views_30d: 22227, q_score: 98.11 },
+      }] },
+    });
+    assert.equal(res.statusCode, 202);
+    assert.equal(res.json().stored, 1);
+    const [entry] = redis.streams.get('wm:observations');
+    assert.equal(entry.key, 'Chat');
+    assert.equal(JSON.parse(entry.data).fields.q_score, 98.11);
+    assert.deepEqual(await redis.hGetAll('wm:obs:latest:Chat'), {
+      seen_at: '2026-09-28T06:00:00Z', card_id: 'c-1', rarity_displayed: 'L', avg_price: '1100',
+      price_current: '1200', page: 'marketplace',
+    });
+  });
+});
+
 describe('CORS', () => {
   test('only https://www.wiki-masters.com is allowed', async () => {
     const { app, redis } = await setup({ predictions: SATURNE_PRED });
@@ -143,6 +205,7 @@ describe('CORS', () => {
     assert.equal(res.statusCode, 204);
     assert.equal(res.headers['access-control-allow-origin'], ORIGIN);
     assert.match(res.headers['access-control-allow-methods'], /GET/);
+    assert.match(res.headers['access-control-allow-methods'], /POST/);
     assert.equal(res.headers['access-control-allow-private-network'], 'true');
     assert.equal(res.headers['access-control-allow-credentials'], undefined);
   });

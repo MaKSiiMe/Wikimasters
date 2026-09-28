@@ -20,6 +20,12 @@ export class FakeRedis {
     return this.hashes.get(key)?.[field] ?? null;
   }
 
+  async hSet(key, obj) {
+    this.#check();
+    this.hset(key, obj);
+    return Object.keys(obj).length;
+  }
+
   async hGetAll(key) {
     this.#check();
     return { ...(this.hashes.get(key) ?? {}) };

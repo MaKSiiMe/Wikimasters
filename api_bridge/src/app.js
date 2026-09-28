@@ -4,6 +4,7 @@ import rateLimit from '@fastify/rate-limit';
 
 import { TtlCache } from './cache.js';
 import { normalizeTitle } from './normalize.js';
+import { RARITIES, buildSignals } from './signals.js';
 
 // Redis schema shared with the tracker (see tracker/storage.py).
 export const KEYS = {
@@ -12,11 +13,16 @@ export const KEYS = {
   invalid: 'wm:articles:invalid',
   stats: (title) => `wm:stats:${title}`,
   requests: 'wm:bridge:requests',
+  observations: 'wm:observations',
+  observedLatest: (title) => `wm:obs:latest:${title}`,
 };
 
 const REQUEST_LOG_MAXLEN = 10000;
+const OBSERVATIONS_MAXLEN = 50000;
+const OBSERVATION_MAX_BYTES = 4000;
 const PENDING_TTL_SECONDS = 15;
 const UNKNOWN_TTL_SECONDS = 300;
+const MAX_BATCH = 60;
 
 const toNumber = (value) => {
   if (value === undefined || value === null || value === '') return null;
@@ -24,24 +30,84 @@ const toNumber = (value) => {
   return Number.isFinite(n) ? n : null;
 };
 
-const cardSchema = {
+// --- JSON schemas ------------------------------------------------------------
+
+const cardContext = {
+  name: { type: 'string', minLength: 1, maxLength: 200 },
+  title: { type: 'string', minLength: 1, maxLength: 300 },
+  rarity: { type: 'string', enum: RARITIES },
+  price: { type: 'number', minimum: 0 },
+  avg_price: { type: 'number', minimum: 0 },
+};
+
+const getCardSchema = {
   params: {
     type: 'object',
     required: ['name'],
-    properties: { name: { type: 'string', minLength: 1, maxLength: 200 } },
+    properties: { name: cardContext.name },
+  },
+  querystring: {
+    type: 'object',
+    properties: { title: cardContext.title, rarity: cardContext.rarity, price: cardContext.price, avg_price: cardContext.avg_price },
+  },
+};
+
+const batchSchema = {
+  body: {
+    type: 'object',
+    required: ['cards'],
+    properties: {
+      cards: {
+        type: 'array',
+        minItems: 1,
+        maxItems: MAX_BATCH,
+        items: { type: 'object', properties: cardContext, anyOf: [{ required: ['name'] }, { required: ['title'] }] },
+      },
+    },
+  },
+};
+
+const observationSchema = {
+  body: {
+    type: 'object',
+    required: ['observations'],
+    properties: {
+      observations: {
+        type: 'array',
+        minItems: 1,
+        maxItems: 100,
+        items: {
+          type: 'object',
+          properties: {
+            seen_at: { type: 'string', maxLength: 40 },
+            page: { type: 'string', maxLength: 40 },
+            card_id: { type: 'string', maxLength: 64 },
+            listing_id: { type: 'string', maxLength: 64 },
+            title: cardContext.title,
+            name: cardContext.name,
+            rarity: cardContext.rarity,
+            price: { type: 'object' },
+            avg_price: { type: 'number' },
+            sales_summary: { type: 'object' },
+            fields: { type: 'object' },
+          },
+          anyOf: [{ required: ['name'] }, { required: ['title'] }],
+        },
+      },
+    },
   },
 };
 
 /**
  * Build the Fastify app. Dependencies are injected so tests can use fakes:
- *   redis   — connected node-redis client (hGet, hGetAll, sIsMember, sCard, sAdd, xAdd, ping)
+ *   redis   — connected node-redis client (hGet, hGetAll, hSet, sIsMember, sCard, sAdd, xAdd, ping)
  *   fetch   — WHATWG fetch used to reach the ML inference API
  */
 export async function buildApp({ config, redis, fetch = globalThis.fetch, logger = true }) {
   const app = Fastify({
     logger: logger === true ? { level: config.logLevel } : logger,
     trustProxy: config.trustProxy,
-    // Names like "Saturne (planète)" arrive percent-encoded; keep them readable in logs.
+    bodyLimit: 256 * 1024,
     routerOptions: { maxParamLength: 300 },
   });
   const allowed = new Set(config.corsOrigins);
@@ -58,7 +124,7 @@ export async function buildApp({ config, redis, fetch = globalThis.fetch, logger
   });
   await app.register(cors, {
     origin: [...allowed],
-    methods: ['GET'],
+    methods: ['GET', 'POST'],
     allowedHeaders: ['Content-Type'],
     credentials: false,
     maxAge: 600,
@@ -69,7 +135,7 @@ export async function buildApp({ config, redis, fetch = globalThis.fetch, logger
     reply.header('Referrer-Policy', 'no-referrer');
     reply.header('Cross-Origin-Resource-Policy', 'cross-origin');
     // Chrome Private Network Access: a public HTTPS page calling an API on
-    // localhost / the LAN must be explicitly allowed by the preflight.
+    // localhost / the LAN / a tailnet must be explicitly allowed by the preflight.
     if (request.method === 'OPTIONS' && request.headers['access-control-request-private-network'] === 'true'
         && allowed.has(request.headers.origin)) {
       reply.header('Access-Control-Allow-Private-Network', 'true');
@@ -102,20 +168,42 @@ export async function buildApp({ config, redis, fetch = globalThis.fetch, logger
     }
   }
 
+  const stringFields = (fields) => Object.fromEntries(
+    Object.entries(fields).map(([k, v]) => [k, v === undefined || v === null ? '' : String(v)]),
+  );
+
+  function streamAdd(key, fields, maxlen) {
+    return redis.xAdd(key, '*', stringFields(fields), {
+      TRIM: { strategy: 'MAXLEN', strategyModifier: '~', threshold: maxlen },
+    });
+  }
+
   function logRequest(fields) {
-    const message = Object.fromEntries(Object.entries(fields).map(([k, v]) => [k, String(v ?? '')]));
-    redis
-      .xAdd(KEYS.requests, '*', message, {
-        TRIM: { strategy: 'MAXLEN', strategyModifier: '~', threshold: REQUEST_LOG_MAXLEN },
-      })
+    streamAdd(KEYS.requests, fields, REQUEST_LOG_MAXLEN)
       .catch((err) => app.log.debug({ err: err.message }, 'request log failed'));
   }
 
-  async function buildCard(name, key) {
+  function rarityFromStats(stats) {
+    if (!stats?.rarity_30d) return null;
+    return {
+      estimated_30d: stats.rarity_30d,
+      estimated_prev_month: stats.rarity_prev_month || null,
+      views_30d: toNumber(stats.views_30d),
+      views_prev_month: toNumber(stats.views_prev_month),
+      next: stats.next_rarity || null,
+      views_to_next: toNumber(stats.views_to_next),
+      eta_days: toNumber(stats.eta_days),
+      downgrade_eta_days: toNumber(stats.downgrade_eta_days),
+      as_of: stats.rarity_as_of || null,
+    };
+  }
+
+  /** Everything that only depends on the article (cacheable). */
+  async function loadBase(key) {
     const title = await redis.hGet(KEYS.alias, key);
     if (!title) {
       if (await redis.sIsMember(KEYS.invalid, key)) {
-        return { code: 404, ttl: UNKNOWN_TTL_SECONDS, body: { status: 'unknown', name, error: 'no_wikipedia_article' } };
+        return { code: 404, ttl: UNKNOWN_TTL_SECONDS, body: { status: 'unknown', error: 'no_wikipedia_article' } };
       }
       // Unknown card: ask the tracker to start following it (bounded queue).
       let queued = false;
@@ -126,7 +214,7 @@ export async function buildApp({ config, redis, fetch = globalThis.fetch, logger
       return {
         code: 202,
         ttl: PENDING_TTL_SECONDS,
-        body: { status: 'pending', name, article: key, queued, message: 'tracking will start within a minute' },
+        body: { status: 'pending', article: key, queued, message: 'tracking will start within a minute' },
       };
     }
 
@@ -137,12 +225,11 @@ export async function buildApp({ config, redis, fetch = globalThis.fetch, logger
       ttl: config.cacheTtlSeconds,
       body: {
         status: 'ok',
-        name,
         article: title,
         wiki_url: wikiUrl(title),
         // Raw evolution computed by the tracker from Redis history.
         evolution_pct: toNumber(stats?.evolution_pct),
-        // Predictive score from the ML inference API (-100..100).
+        // Predictive score from the ML inference API (-100..100), experimental.
         trend_score: ml ? toNumber(ml.trend_score) : null,
         spike_probability: ml ? toNumber(ml.spike_probability) : null,
         direction: ml?.direction ?? null,
@@ -154,29 +241,88 @@ export async function buildApp({ config, redis, fetch = globalThis.fetch, logger
           as_of: stats?.as_of || null,
           updated_at: stats?.updated_at || null,
         },
+        rarity: rarityFromStats(stats),
         model: ml ? { version: ml.model, as_of: ml.as_of, horizon_days: ml.horizon_days } : null,
         ...(prediction.error ? { prediction_error: prediction.error } : {}),
       },
     };
   }
 
-  // --- routes ----------------------------------------------------------------
-
-  app.get('/api/card/:name', { schema: cardSchema }, async (request, reply) => {
-    const started = performance.now();
-    const name = request.params.name.trim();
-    const key = normalizeTitle(name);
-    if (!key) return reply.code(400).send({ status: 'error', error: 'empty_name' });
-
+  async function getBase(key) {
     let result = cache.get(key);
     const hit = Boolean(result);
     if (!result) {
-      result = await buildCard(name, key);
+      result = await loadBase(key);
       cache.set(key, result, result.ttl);
     }
-    logRequest({ name, key, code: result.code, cache: hit ? 'hit' : 'miss', ms: Math.round(performance.now() - started) });
-    reply.header('Cache-Control', `private, max-age=${Math.min(result.ttl, config.cacheTtlSeconds)}`);
-    return reply.code(result.code).send({ ...result.body, name });
+    return { result, hit };
+  }
+
+  /** Card response = cached article data + what the HUD saw in the game. */
+  async function cardResponse(ctx) {
+    const key = normalizeTitle(ctx.title || ctx.name);
+    if (!key) return { code: 400, body: { status: 'error', error: 'empty_name' }, hit: false };
+    const { result, hit } = await getBase(key);
+    const body = { ...result.body, name: ctx.name ?? ctx.title ?? key };
+    if (result.code === 200) {
+      body.displayed_rarity = ctx.rarity ?? null;
+      body.signals = buildSignals({
+        rarity: body.rarity,
+        raw: body.raw,
+        evolutionPct: body.evolution_pct,
+        displayedRarity: ctx.rarity,
+        price: ctx.price,
+        avgPrice: ctx.avg_price,
+      });
+    }
+    return { code: result.code, body, hit, ttl: result.ttl };
+  }
+
+  // --- routes ----------------------------------------------------------------
+
+  app.get('/api/card/:name', { schema: getCardSchema }, async (request, reply) => {
+    const started = performance.now();
+    const ctx = { ...request.query, name: request.params.name.trim() };
+    const res = await cardResponse(ctx);
+    logRequest({ route: 'card', name: ctx.name, code: res.code, cache: res.hit ? 'hit' : 'miss', ms: Math.round(performance.now() - started) });
+    if (res.ttl) reply.header('Cache-Control', `private, max-age=${Math.min(res.ttl, config.cacheTtlSeconds)}`);
+    return reply.code(res.code).send(res.body);
+  });
+
+  // One request for every card on screen (the marketplace shows dozens).
+  app.post('/api/cards', { schema: batchSchema }, async (request, reply) => {
+    const started = performance.now();
+    const results = await Promise.all(request.body.cards.map(async (ctx) => {
+      const res = await cardResponse(ctx);
+      return { http_status: res.code, ...res.body };
+    }));
+    logRequest({ route: 'cards', count: results.length, ms: Math.round(performance.now() - started) });
+    return reply.send({ results });
+  });
+
+  // What the HUD saw in the game (rarity, prices...): raw material to learn the
+  // game's rarity rule and to score our signals against real prices.
+  app.post('/api/observations', { schema: observationSchema }, async (request, reply) => {
+    let stored = 0;
+    for (const obs of request.body.observations) {
+      const json = JSON.stringify(obs);
+      if (json.length > OBSERVATION_MAX_BYTES) continue;
+      const key = normalizeTitle(obs.title || obs.name);
+      await streamAdd(KEYS.observations, { key, data: json }, OBSERVATIONS_MAXLEN);
+      const latest = {
+        seen_at: obs.seen_at || new Date().toISOString(),
+        card_id: obs.card_id,
+        rarity_displayed: obs.rarity,
+        avg_price: obs.avg_price,
+        price_current: obs.price?.current ?? obs.price?.effective ?? obs.price?.base,
+        page: obs.page,
+      };
+      await redis.hSet(KEYS.observedLatest(key), stringFields(Object.fromEntries(
+        Object.entries(latest).filter(([, v]) => v !== undefined && v !== null),
+      )));
+      stored += 1;
+    }
+    return reply.code(202).send({ status: 'ok', stored });
   });
 
   app.get('/health', async (request, reply) => {
@@ -201,6 +347,7 @@ export async function buildApp({ config, redis, fetch = globalThis.fetch, logger
       return reply.code(400).send({ status: 'error', error: 'invalid_request', message: err.message });
     }
     if (err.statusCode === 429) return reply.code(429).send({ status: 'error', error: 'rate_limited' });
+    if (err.statusCode === 413) return reply.code(413).send({ status: 'error', error: 'payload_too_large' });
     request.log.error({ err }, 'request failed');
     return reply.code(503).send({ status: 'error', error: 'backend_unavailable' });
   });
