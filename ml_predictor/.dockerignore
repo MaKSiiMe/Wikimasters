@@ -1,0 +1,8 @@
+models/
+tests/
+__pycache__/
+*.pyc
+.pytest_cache/
+train.py
+requirements-train.txt
+requirements-dev.txt

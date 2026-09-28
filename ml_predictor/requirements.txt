@@ -1,0 +1,6 @@
+# Inference micro-service (Docker image, CPU only — no PyTorch here)
+fastapi==0.141.1
+uvicorn==0.54.0
+onnxruntime==1.30.0
+numpy==2.5.3
+redis==8.1.0
